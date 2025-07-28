@@ -28,107 +28,15 @@ func connect(ctx context.Context, t *testing.T) *pgxpool.Pool {
 	return conn
 }
 
-func TestNonRepeatableRead(t *testing.T) {
-	ctx := context.Background()
-	conn := connect(ctx, t)
-	defer conn.Close()
-
-	testFlow := func(repeatableRead bool) {
-		// Создаём тестовую таблицу.
-		tableName := utils.RandomString(32)
-		_, err := conn.Exec(
-			ctx,
-			fmt.Sprintf(
-				`
-			CREATE TABLE %v
-			(
-				id TEXT PRIMARY KEY,
-				balance INTEGER
-			);
-			`,
-				tableName,
-			),
-		)
-		defer dropTable(ctx, t, conn, tableName)
-		require.NoError(t, err)
-
-		// Сохраняем исходные данные в таблице.
-		_, err = conn.Exec(ctx, fmt.Sprintf(`INSERT INTO %v VALUES ($1, $2);`, tableName), "bob", 200)
-		require.NoError(t, err)
-
-		// Проверяем факт сохранения данных.
-		actualBalance := 0
-		require.NoError(t, conn.QueryRow(ctx, fmt.Sprintf(`SELECT balance FROM %v WHERE id = $1;`, tableName), "bob").Scan(&actualBalance))
-		require.Equal(t, 200, actualBalance)
-
-		// Начинаем транзакцию №1.
-		opts := pgx.TxOptions{IsoLevel: pgx.ReadCommitted}
-		if repeatableRead {
-			// В зависимости от кейса проставляем уровень изоляции транзакции №1.
-			opts.IsoLevel = pgx.RepeatableRead
-		}
-		tx1, err := conn.BeginTx(ctx, opts)
-		require.NoError(t, err)
-		// Считываем баланс Боба.
-		initBalanceTx1 := 0
-		require.NoError(t, tx1.QueryRow(ctx, fmt.Sprintf(`SELECT balance FROM %v WHERE id = $1;`, tableName), "bob").Scan(&initBalanceTx1))
-		// Рассчитаем доход по вкладу на основе считанного значения.
-		income := initBalanceTx1 / 10
-
-		// Начинаем транзакцию №2. К балансу Боба добавляем 100.
-		// Уровень изоляции транзакции №2 есть READ COMMITTED, т.е. по умолчанию.
-		tx2, err := conn.Begin(ctx)
-		require.NoError(t, err)
-		balanceTx2 := 0
-		require.NoError(t, tx1.QueryRow(ctx, fmt.Sprintf(`SELECT balance FROM %v WHERE id = $1;`, tableName), "bob").Scan(&balanceTx2))
-		_, err = tx2.Exec(ctx, fmt.Sprintf(`UPDATE %v SET balance = $1 WHERE id = $2;`, tableName), balanceTx2+100, "bob")
-		require.NoError(t, err)
-		// Завершаем транзакцию №2.
-		require.NoError(t, tx2.Commit(ctx))
-
-		// Вновь считываем баланс Боба в транзакции №1.
-		lastBalanceTx1 := 0
-		require.NoError(t, tx1.QueryRow(ctx, fmt.Sprintf(`SELECT balance FROM %v WHERE id = $1;`, tableName), "bob").Scan(&lastBalanceTx1))
-
-		// В рамках транзакции №1 пополняем баланс Боба на сумму дохода по вкладу, рассчитанную в начале.
-		_, err = tx1.Exec(ctx, fmt.Sprintf(`UPDATE %v SET balance = $1 WHERE id = $2;`, tableName), lastBalanceTx1+income, "bob")
-		if repeatableRead {
-			// При уровне изоляции REPEATABLE READ произойдет ошибка сериализации, так как данные в строке были изменены в транзакции №2.
-			assert.Error(t, err)
-		} else {
-			// При уровне изоляции READ COMMITTED ошибки не произойдёт, и к балансу Боба будет прибавлен доход, рассчитанный по устаревшим данным.
-			assert.NoError(t, err)
-		}
-		// Завершаем транзакцию №1 в любом случае. При ошибке на предыдущем шаге можно было сделать также Rollback.
-		err = tx1.Commit(ctx)
-		if repeatableRead {
-			require.Error(t, err)
-			return
-		}
-		require.NoError(t, err)
-
-		// Вновь считываем баланс Боба после всех транзакций.
-		actualBalance = 0
-		require.NoError(t, conn.QueryRow(ctx, fmt.Sprintf(`SELECT balance FROM %v WHERE id = $1;`, tableName), "bob").Scan(&actualBalance))
-		// Доход от вклада был посчитан не от конечной суммы (200+100)/10...
-		assert.NotEqual(t, (200+100)/10+200+100, actualBalance)
-		// А от изначальной 200/10.
-		assert.Equal(t, 200/10+200+100, actualBalance)
-		// Это объясняется тем, что на уровне изоляции READ COMMITTED произошла аномалия неповторяющегося чтения, вследствие чего
-		// одинаковые SELECT-ы в рамках одной транзакции дали разныый результат: по одному был рассчитан доход, по другому произошло начисление.
-	}
-
-	t.Run("anomaly on READ COMMITTED", func(t *testing.T) { testFlow(false) })
-	t.Run("error on REPEATABLE READ", func(t *testing.T) { testFlow(true) })
-}
-
+// TestLostUpdate демонстрирует аномалию "потерянного обновления" данных при уровне изоляции READ COMMITTED,
+// а также её устранение использованием REPEATABLE READ.
 func TestLostUpdate(t *testing.T) {
 	ctx := context.Background()
 	conn := connect(ctx, t)
 	defer conn.Close()
 
 	testFlow := func(repeatableRead bool) {
-		// Создаём тестовую таблицу.
+		// Создаём тестовую таблицу: ID пользователя и его баланс.
 		tableName := utils.RandomString(32)
 		_, err := conn.Exec(
 			ctx,
@@ -146,30 +54,34 @@ func TestLostUpdate(t *testing.T) {
 		defer dropTable(ctx, t, conn, tableName)
 		require.NoError(t, err)
 
-		// Сохраняем исходные данные в таблице.
-		_, err = conn.Exec(ctx, fmt.Sprintf(`INSERT INTO %v VALUES ($1, $2);`, tableName), "bob", 200)
+		// Сохраняем исходные данные в таблице: у пользователя "Боб" баланс 300 руб.
+		_, err = conn.Exec(ctx, fmt.Sprintf(`INSERT INTO %v VALUES ($1, $2);`, tableName), "bob", 300)
 		require.NoError(t, err)
 
 		// Проверяем факт сохранения данных.
 		actualBalance := 0
 		require.NoError(t, conn.QueryRow(ctx, fmt.Sprintf(`SELECT balance FROM %v WHERE id = $1;`, tableName), "bob").Scan(&actualBalance))
-		require.Equal(t, 200, actualBalance)
+		require.Equal(t, 300, actualBalance)
 
-		// Начинаем транзакцию №1. Считываем баланс Боба.
+		// Начинаем транзакцию №1.
+		// В зависимости от сценария проставляем уровень изоляции транзакции №1: READ COMMITTED или REPEATABLE READ.
 		opts := pgx.TxOptions{IsoLevel: pgx.ReadCommitted}
 		if repeatableRead {
-			// В зависимости от кейса проставляем уровень изоляции транзакции №1.
 			opts.IsoLevel = pgx.RepeatableRead
 		}
 		tx1, err := conn.BeginTx(ctx, opts)
 		require.NoError(t, err)
+		// Считываем баланс Боба (300 руб.).
 		balanceTx1 := 0
 		require.NoError(t, tx1.QueryRow(ctx, fmt.Sprintf(`SELECT balance FROM %v WHERE id = $1;`, tableName), "bob").Scan(&balanceTx1))
+		assert.Equal(t, 300, balanceTx1)
 
-		// Начинаем транзакцию №2. Считываем баланс Боба и отнимаем от него 100.
+		// Начинаем транзакцию №2.
 		// Уровень изоляции транзакции №2 есть READ COMMITTED, т.е. по умолчанию.
 		tx2, err := conn.Begin(ctx)
 		require.NoError(t, err)
+		// Считываем баланс Боба (300 руб.) и отнимаем от него 100 руб.
+		// Итого в рамках транзакции №2 у Боба осталось 200 руб.
 		balanceTx2 := 0
 		require.NoError(t, tx1.QueryRow(ctx, fmt.Sprintf(`SELECT balance FROM %v WHERE id = $1;`, tableName), "bob").Scan(&balanceTx2))
 		_, err = tx2.Exec(ctx, fmt.Sprintf(`UPDATE %v SET balance = $1 WHERE id = $2;`, tableName), balanceTx2-100, "bob")
@@ -177,35 +89,260 @@ func TestLostUpdate(t *testing.T) {
 		// Завершаем транзакцию №2.
 		require.NoError(t, tx2.Commit(ctx))
 
-		// В рамках транзакции №1 пополняем баланс Боба на 500, используя ранее считанное значение баланса.
+		// В рамках транзакции №1 пополняем баланс Боба на 500 руб., используя ранее считанное значение баланса.
 		_, err = tx1.Exec(ctx, fmt.Sprintf(`UPDATE %v SET balance = $1 WHERE id = $2;`, tableName), balanceTx1+500, "bob")
 		if repeatableRead {
-			// При уровне изоляции REPEATABLE READ произойдет ошибка сериализации, так как данные в строке были изменены в транзакции №2.
+			// При уровне изоляции REPEATABLE READ произойдет ошибка сериализации,
+			// так как данные в строке были уже изменены в транзакции №2.
 			assert.Error(t, err)
 		} else {
-			// При уровне изоляции READ COMMITTED ошибки не произойдёт, и данные транзакции №2 будут потеряны.
+			// При уровне изоляции READ COMMITTED ошибки не произойдёт,
+			// и обновление баланса, совершённое в рамках транзакции №2, будет потеряно.
 			assert.NoError(t, err)
 		}
-		// Завершаем транзакцию №1 в любом случае. При ошибке на предыдущем шаге можно было сделать также Rollback.
+		// Завершаем транзакцию №1.
 		err = tx1.Commit(ctx)
 		if repeatableRead {
+			// При ошибке на предыдущем шаге на уровне изоляции REPEATABLE READ правильнее было бы сразу сделать tx1.Rollback.
+			// При tx1.Commit завершение транзакции произойдёт с ошибкой "unexpected rollback".
 			require.Error(t, err)
-			return
+		} else {
+			// При уровне изоляции READ COMMITTED транзакция №1 будет завершена без ошибки.
+			require.NoError(t, err)
 		}
-		require.NoError(t, err)
 
-		// Предполагаемый баланс после двух транзакций.
+		// Проверяем итоговый баланс Боба.
 		require.NoError(t, conn.QueryRow(ctx, fmt.Sprintf(`SELECT balance FROM %v WHERE id = $1;`, tableName), "bob").Scan(&actualBalance))
-		assert.NotEqual(t, 200-100+500, actualBalance)
-
-		// Обновление транзакции №2 будет потеряно (аномалия), так как
-		// уровень изоляции READ COMMITTED не выдал ошибку при повторном обновлении строки в рамках транзакции №1.
-		// Транзакция №1 произвела обновление, основанное на "старом" чтении, произошедшем до действий транзакции №2.
-		assert.Equal(t, 200+500, actualBalance)
+		if repeatableRead {
+			// При уровне изоляции REPEATABLE READ будут сохранены изменения, внесённые только транзакцией №2.
+			// Баланс Боба был уменьшен на 100 руб. и составляет 200 руб. Получилось избежать грубой ошибки потери обновления.
+			assert.Equal(t, 300-100, actualBalance)
+		} else {
+			// При уровне изоляции READ COMMITTED обновление транзакции №2 будет потеряно (аномалия),
+			// так как не была выдана ошибка при повторном обновлении строки в рамках транзакции №1.
+			// Такие образом транзакция №1 произвела обновление, основанное на "старом" чтении, произошедшем до действий транзакции №2.
+			// Баланс Боба был увеличен на 500 руб. и составляет 800 руб., что является грубой ошибкой.
+			assert.Equal(t, 300+500, actualBalance)
+		}
 	}
 
 	t.Run("anomaly on READ COMMITTED", func(t *testing.T) { testFlow(false) })
-	t.Run("error on REPEATABLE READ", func(t *testing.T) { testFlow(true) })
+	t.Run("proper behavior on REPEATABLE READ", func(t *testing.T) { testFlow(true) })
+}
+
+// TestNonRepeatableRead демонстрирует аномалию "неповторяющегося чтения" данных при уровне изоляции READ COMMITTED,
+// а также её устранение использованием REPEATABLE READ.
+func TestNonRepeatableRead(t *testing.T) {
+	ctx := context.Background()
+	conn := connect(ctx, t)
+	defer conn.Close()
+
+	testFlow := func(repeatableRead bool) {
+		// Создаём тестовую таблицу: ID пользователя и его баланс.
+		tableName := utils.RandomString(32)
+		_, err := conn.Exec(
+			ctx,
+			fmt.Sprintf(
+				`
+			CREATE TABLE %v
+			(
+				id TEXT PRIMARY KEY,
+				balance INTEGER
+			);
+			`,
+				tableName,
+			),
+		)
+		defer dropTable(ctx, t, conn, tableName)
+		require.NoError(t, err)
+
+		// Сохраняем исходные данные в таблице: у пользователя "Боб" баланс 300 руб.
+		_, err = conn.Exec(ctx, fmt.Sprintf(`INSERT INTO %v VALUES ($1, $2);`, tableName), "bob", 300)
+		require.NoError(t, err)
+
+		// Проверяем факт сохранения данных.
+		actualBalance := 0
+		require.NoError(t, conn.QueryRow(ctx, fmt.Sprintf(`SELECT balance FROM %v WHERE id = $1;`, tableName), "bob").Scan(&actualBalance))
+		require.Equal(t, 300, actualBalance)
+
+		// Начинаем транзакцию №1.
+		// В зависимости от сценария проставляем уровень изоляции транзакции №1: READ COMMITTED или REPEATABLE READ.
+		opts := pgx.TxOptions{IsoLevel: pgx.ReadCommitted}
+		if repeatableRead {
+			opts.IsoLevel = pgx.RepeatableRead
+		}
+		tx1, err := conn.BeginTx(ctx, opts)
+		require.NoError(t, err)
+		// Считываем баланс Боба (300 руб.).
+		initBalanceTx1 := 0
+		require.NoError(t, tx1.QueryRow(ctx, fmt.Sprintf(`SELECT balance FROM %v WHERE id = $1;`, tableName), "bob").Scan(&initBalanceTx1))
+		assert.Equal(t, 300, initBalanceTx1)
+		// Рассчитаем доход по вкладу на основе считанного значения.
+		income := initBalanceTx1 / 10
+
+		// Начинаем транзакцию №2.
+		// Уровень изоляции транзакции №2 есть READ COMMITTED, т.е. по умолчанию.
+		tx2, err := conn.Begin(ctx)
+		require.NoError(t, err)
+		// Считываем баланс Боба (300 руб.) и пополняем на 100 руб.
+		// Итого в рамках транзакции №2 у Боба осталось 200 руб.
+		balanceTx2 := 0
+		require.NoError(t, tx1.QueryRow(ctx, fmt.Sprintf(`SELECT balance FROM %v WHERE id = $1;`, tableName), "bob").Scan(&balanceTx2))
+		_, err = tx2.Exec(ctx, fmt.Sprintf(`UPDATE %v SET balance = $1 WHERE id = $2;`, tableName), balanceTx2+100, "bob")
+		require.NoError(t, err)
+		// Завершаем транзакцию №2.
+		require.NoError(t, tx2.Commit(ctx))
+
+		// В рамках транзакции №1 вновь считываем баланс Боба.
+		balanceTx1 := 0
+		require.NoError(t, tx1.QueryRow(ctx, fmt.Sprintf(`SELECT balance FROM %v WHERE id = $1;`, tableName), "bob").Scan(&balanceTx1))
+		if repeatableRead {
+			// При уровне изоляции REPEATABLE READ изменения, произведённые в рамках транзакции №2,
+			// не повлияют на повторное чтение в транзакции №1. Баланс будет по-прежнему 300 руб.
+			assert.Equal(t, 300, balanceTx1)
+		} else {
+			// При уровне изоляции READ COMMITTED повторное чтение после завершённой транзакции №2
+			// даст уже новое значение баланса в 400 руб., что есть "неповторяющееся чтение" (аномалия).
+			assert.Equal(t, 400, balanceTx1)
+		}
+
+		// В рамках транзакции №1 пополняем баланс Боба на сумму дохода по вкладу, рассчитанную при первом чтении.
+		_, err = tx1.Exec(ctx, fmt.Sprintf(`UPDATE %v SET balance = $1 WHERE id = $2;`, tableName), balanceTx1+income, "bob")
+		if repeatableRead {
+			// При уровне изоляции REPEATABLE READ произойдет ошибка сериализации,
+			// так как данные в строке были уже изменены в транзакции №2.
+			assert.Error(t, err)
+		} else {
+			// При уровне изоляции READ COMMITTED ошибки не произойдёт,
+			// и доход от вклада будет в итоге спорным.
+			assert.NoError(t, err)
+		}
+		// Завершаем транзакцию №1.
+		err = tx1.Commit(ctx)
+		if repeatableRead {
+			// При ошибке на предыдущем шаге на уровне изоляции REPEATABLE READ правильнее было бы сразу сделать tx1.Rollback.
+			// При tx1.Commit завершение транзакции произойдёт с ошибкой "unexpected rollback".
+			require.Error(t, err)
+		} else {
+			// При уровне изоляции READ COMMITTED транзакция №1 будет завершена без ошибки.
+			require.NoError(t, err)
+		}
+
+		// Проверяем итоговый баланс Боба.
+		require.NoError(t, conn.QueryRow(ctx, fmt.Sprintf(`SELECT balance FROM %v WHERE id = $1;`, tableName), "bob").Scan(&actualBalance))
+		if repeatableRead {
+			// При уровне изоляции REPEATABLE READ будут сохранены изменения, внесённые только транзакцией №2.
+			// Баланс Боба был увеличен на 100 руб. и составляет 400 руб. Получилось избежать грубой ошибки неповторяющегося чтпния.
+			// Транзакция по начислению дохода будет запущена повторно, и доход будет рассчитан от верной суммы, без потерь.
+			assert.Equal(t, 300+100, actualBalance)
+		} else {
+			// При уровне изоляции READ COMMITTED доход от вклада будет рассчитан при первом чтении (от 300 руб.).
+			// Однако конкурирующая транзакция повысила баланс на 100 руб., вследствие чего сумма дохода является спорной:
+			// не понятно, от 300 или 400 рублей её нужно рассчитывать. Будет сохранён один из вариантов, который может вызвать споры.
+			// Имеем дело с аномалией неповторяющегося чтения.
+			assert.Equal(t, 400+30, actualBalance)
+		}
+	}
+	t.Run("anomaly on READ COMMITTED", func(t *testing.T) { testFlow(false) })
+	t.Run("proper behavior on REPEATABLE READ", func(t *testing.T) { testFlow(true) })
+}
+
+// TestDirtyRead демонстрирует аномалию грязного чтения при уровне изоляции READ UNCOMMITTED,
+// а также её устранение использованием READ COMMITTED.
+// NOTE: выяснилось, что PostgreSQL не поддерживает "грязные чтения", поэтому негативный кейс проверить невозможно.
+func TestDirtyRead(t *testing.T) {
+	ctx := context.Background()
+	conn := connect(ctx, t)
+	defer conn.Close()
+
+	testFlow := func(readCommitted bool) {
+		// Создаём тестовую таблицу: ID пользователя и его баланс.
+		tableName := utils.RandomString(32)
+		_, err := conn.Exec(
+			ctx,
+			fmt.Sprintf(
+				`
+			CREATE TABLE %v
+			(
+				id TEXT PRIMARY KEY,
+				balance INTEGER
+			);
+			`,
+				tableName,
+			),
+		)
+		defer dropTable(ctx, t, conn, tableName)
+		require.NoError(t, err)
+
+		// Сохраняем исходные данные в таблице: у пользователя "Боб" баланс 300 руб.
+		_, err = conn.Exec(ctx, fmt.Sprintf(`INSERT INTO %v VALUES ($1, $2);`, tableName), "bob", 300)
+		require.NoError(t, err)
+
+		// Проверяем факт сохранения данных.
+		actualBalance := 0
+		require.NoError(t, conn.QueryRow(ctx, fmt.Sprintf(`SELECT balance FROM %v WHERE id = $1;`, tableName), "bob").Scan(&actualBalance))
+		require.Equal(t, 300, actualBalance)
+
+		// Начинаем транзакцию №1.
+		// В зависимости от сценария проставляем уровень изоляции транзакции №1: READ COMMITTED или READ UNCOMMITTED.
+		opts := pgx.TxOptions{IsoLevel: pgx.ReadUncommitted}
+		if readCommitted {
+			opts.IsoLevel = pgx.ReadCommitted
+		}
+		tx1, err := conn.BeginTx(ctx, opts)
+		require.NoError(t, err)
+
+		// Начинаем транзакцию №2.
+		// Уровень изоляции транзакции №2 есть READ COMMITTED, т.е. по умолчанию.
+		tx2, err := conn.Begin(ctx)
+		require.NoError(t, err)
+		// Считываем баланс Боба (300 руб.) и отнимаем от него 100 руб.
+		// Итого в рамках транзакции №2 у Боба осталось 200 руб. Не завершаем транзакцию №2.
+		balanceTx2 := 0
+		require.NoError(t, tx1.QueryRow(ctx, fmt.Sprintf(`SELECT balance FROM %v WHERE id = $1;`, tableName), "bob").Scan(&balanceTx2))
+		_, err = tx2.Exec(ctx, fmt.Sprintf(`UPDATE %v SET balance = $1 WHERE id = $2;`, tableName), balanceTx2-100, "bob")
+		require.NoError(t, err)
+
+		// Считываем баланс Боба в рамках транзакции №1.
+		balanceTx1 := 0
+		require.NoError(t, tx1.QueryRow(ctx, fmt.Sprintf(`SELECT balance FROM %v WHERE id = $1;`, tableName), "bob").Scan(&balanceTx1))
+		if readCommitted {
+			// При уровне изоляции READ COMMITTED изменений баланса не наблюдаем, так как транзакция №2 не завершена.
+			// Здесь баланс Боба по-прежнему составляет 300 руб.
+			assert.Equal(t, 300, balanceTx1)
+		} else {
+			// При уровне изоляции READ UNCOMMITTED видим изменения баланса, внесённые ещё не завершённой транзакцией №2.
+			// Здесь баланс Боба составляет 200 руб.
+			// NOTE: PostgreSQL не поддерживает "грязного чтения", кейс проверить невозможно.
+			// assert.Equal(t, 300-100, balanceTx1)
+		}
+
+		// Отменяем транзакцию №2.
+		require.NoError(t, tx2.Rollback(ctx))
+
+		// В рамках транзакции №1 пополняем баланс Боба на 500 руб., используя считанное значение баланса.
+		_, err = tx1.Exec(ctx, fmt.Sprintf(`UPDATE %v SET balance = $1 WHERE id = $2;`, tableName), balanceTx1+500, "bob")
+		assert.NoError(t, err)
+
+		// Завершаем транзакцию №1 .
+		require.NoError(t, tx1.Commit(ctx))
+
+		// Проверяем баланс Боба.
+		require.NoError(t, conn.QueryRow(ctx, fmt.Sprintf(`SELECT balance FROM %v WHERE id = $1;`, tableName), "bob").Scan(&actualBalance))
+		if readCommitted {
+			// При уровне изоляции READ COMMITTED на транзакцию №1 не повлияла отменённая транзакции №2.
+			// Баланс Боба составляет 800 руб, каким и должен быть.
+			assert.Equal(t, 300+500, actualBalance)
+		} else {
+			// При уровне изоляции READ UNCOMMITTED в транзакцию №1 попали действия из отменённой транзакции №2.
+			// Поэтому баланс Боба на 100 руб. меньше, чем должен быть, т.е. 700 руб.
+			// NOTE: PostgreSQL не поддерживает "грязного чтения", кейс проверить невозможно.
+			// assert.Equal(t, 300+500-100, actualBalance)
+		}
+	}
+
+	t.Run("anomaly on READ UNCOMMITTED", func(t *testing.T) { testFlow(false) })
+	t.Run("proper behavior on READ COMMITTED", func(t *testing.T) { testFlow(true) })
 }
 
 func dropTable(ctx context.Context, t *testing.T, conn *pgxpool.Pool, tableName string) {
