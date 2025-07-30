@@ -3,5 +3,8 @@
  
 Код репозитория в основном состоит из юнит- или функциональных тестов.
 
-- /linkname/linkname_test.go — линк неэкспортируемых сущностей.
-- /postgresql/isolation_levels_test.go — уровни изоляции  и аномалии чтения PostgreSQL.
+- linkname/linkname_test.go — изучение линковки неэкспортируемых сущностей.
+- pkg/blindsaga — простейший оркестратор для "слепой саги".
+- pkg/dostack — хранилище команд с поддержкой стековой отмены.
+- postgresql/isolation_levels_test.go — изучение уровней изоляции  и аномалий чтения PostgreSQL.
+- reflect/types_and_values_test.go — исследование свойств reflect.Type и reflect.Value.
