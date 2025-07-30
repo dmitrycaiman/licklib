@@ -6,5 +6,8 @@
 - linkname/linkname_test.go — изучение линковки неэкспортируемых сущностей.
 - pkg/blindsaga — простейший оркестратор для "слепой саги".
 - pkg/dostack — хранилище команд с поддержкой стековой отмены.
+- pkg/meanval — модуль расчёта и хранения средних значений.
+- pkg/tcp — простейшие TCP клиент и сервер.
+- pkg/udp — простейшие UDP "клиент" и "сервер".
 - postgresql/isolation_levels_test.go — изучение уровней изоляции  и аномалий чтения PostgreSQL.
 - reflect/types_and_values_test.go — исследование свойств reflect.Type и reflect.Value.
