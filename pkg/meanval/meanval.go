@@ -2,8 +2,6 @@ package meanval
 
 import "sync"
 
-type Resolver interface{ Resolve(int) int }
-
 // Meanval есть модуль расчёта и хранения средних значений.
 type Meanval struct {
 	mu      sync.RWMutex
