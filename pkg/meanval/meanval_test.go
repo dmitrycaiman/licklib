@@ -30,7 +30,7 @@ func TestMeanval(t *testing.T) {
 			wg.Done()
 		}()
 		go func() {
-			m.Update(fmt.Sprint(i), i)
+			assert.Equal(t, NonExistentValue, m.Update(fmt.Sprint(i), i))
 			wg.Done()
 		}()
 	}
@@ -41,10 +41,18 @@ func TestMeanval(t *testing.T) {
 	assert.Equal(t, 500, m.Select("c"))
 
 	m.Reset("a")
-	assert.Zero(t, m.points["a"])
+	assert.NotZero(t, m.points["a"])
 	assert.Zero(t, m.storage["a"])
+	assert.Equal(t, NonExistentValue, m.Select("a"))
 
 	m.Reset("")
+	assert.Empty(t, m.storage)
+
+	m.Delete("b")
+	assert.Zero(t, m.points["b"])
+	assert.Zero(t, m.storage["b"])
+
+	m.Delete("")
 	assert.Empty(t, m.points)
 	assert.Empty(t, m.storage)
 }
