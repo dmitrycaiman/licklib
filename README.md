@@ -11,4 +11,6 @@
 - pkg/udp — простейшие UDP "клиент" и "сервер".
 - postgresql/isolation_levels_test.go — изучение уровней изоляции  и аномалий чтения PostgreSQL.
 - reflect/types_and_values_test.go — исследование свойств reflect.Type и reflect.Value.
+- threadsafe/condqueue — реализация многопоточной FIFO-очереди на Condition Variable.
+- threadsafe/mcqueue — реализация многопоточной FIFO-очереди Майкла-Скотта (lockfree).
 - workerpool — пул конкурентных исполнителей простых операций; FanIn, FanOut.
