@@ -11,3 +11,4 @@
 - pkg/udp — простейшие UDP "клиент" и "сервер".
 - postgresql/isolation_levels_test.go — изучение уровней изоляции  и аномалий чтения PostgreSQL.
 - reflect/types_and_values_test.go — исследование свойств reflect.Type и reflect.Value.
+- workerpool — пул конкурентных исполнителей простых операций.
