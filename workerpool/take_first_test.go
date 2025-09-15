@@ -69,7 +69,6 @@ func TestTakeFirstToList(t *testing.T) {
 			wg.Wait()
 		},
 	)
-
 	t.Run(
 		"closed input channel",
 		func(t *testing.T) {
@@ -162,7 +161,6 @@ func TestTakeFirstToChan(t *testing.T) {
 			wg.Wait()
 		},
 	)
-
 	t.Run(
 		"closed input channel",
 		func(t *testing.T) {
