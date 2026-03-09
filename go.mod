@@ -4,8 +4,10 @@ go 1.23.0
 
 require (
 	github.com/jackc/pgx/v5 v5.7.5
-	github.com/stretchr/testify v1.10.0
+	github.com/stretchr/testify v1.11.1
 )
+
+require go.uber.org/goleak v1.3.0
 
 require (
 	github.com/davecgh/go-spew v1.1.1 // indirect
