@@ -1,0 +1,7 @@
+Before modifyArray: [1 2 3]
+Inside modifyArray: [10 2 3]
+After modifyArray: [1 2 3]
+Before modifySlice: [1 2 3]
+Inside modifySlice: [10 2 3]
+After modifySlice: [10 2 3]
+Final array: [10 2 3]

@@ -5,7 +5,7 @@ import (
 	"sync"
 )
 
-// Transform перенаправляет из входного канала в выходной все значения, подвергая их трансформации.
+// Transform перенаправляет из входного канала в выходной все значения, подвергая их трансформации в N независимых исполнителях.
 func Transform[T1, T2 any](ctx context.Context, input <-chan T1, transform func(T1) T2, n int) <-chan T2 {
 	output := make(chan T2)
 
