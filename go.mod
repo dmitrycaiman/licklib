@@ -1,6 +1,6 @@
 module licklib
 
-go 1.23.7
+go 1.23.0
 
 require (
 	github.com/jackc/pgx/v5 v5.7.5
@@ -20,5 +20,4 @@ require (
 	golang.org/x/sync v0.13.0 // indirect
 	golang.org/x/text v0.24.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
-
 )

@@ -3,7 +3,7 @@
  
 Код репозитория в основном состоит из юнит- или функциональных тестов.
 
-- linkname/linkname_test.go — изучение линковки неэкспортируемых сущностей.
+- linkname — изучение линковки неэкспортируемых сущностей.
 - pkg/circuitbreaker — ограничитель исполнения по количеству ошибок в единицу времени (Circuit Breaker).
 - pkg/blindsaga — простейший оркестратор для "слепой саги".
 - pkg/dostack — хранилище команд с поддержкой стековой отмены.
@@ -16,4 +16,4 @@
 - reflect/types_and_values_test.go — исследование свойств reflect.Type и reflect.Value.
 - threadsafe/condqueue — реализация многопоточной FIFO-очереди на Condition Variable.
 - threadsafe/mcqueue — реализация многопоточной FIFO-очереди Майкла-Скотта (lockfree).
-- workerpool — пул конкурентных исполнителей простых операций; FanIn, FanOut; Take First N; Poll; SingleFlight; Filter; Transform.
+- workerpool — пул конкурентных исполнителей простых операций; FanIn, FanOut; Take First N; Poll; SingleFlight; Filter; Transform; MovingLater.
